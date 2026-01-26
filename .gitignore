@@ -1,0 +1,18 @@
+# Thư mục thư viện (rất nặng, không bao giờ đưa lên GitHub)
+node_modules/
+
+# File chứa biến môi trường (mật khẩu, API key - cần bảo mật)
+.env
+
+# Thư mục chứa kết quả biên dịch (ví dụ từ TS sang JS)
+dist/
+build/
+out/
+
+# File rác của hệ điều hành
+.DS_Store
+Thumbs.db
+
+# Log lỗi
+npm-debug.log*
+yarn-error.log*
