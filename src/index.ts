@@ -3,7 +3,7 @@ import express, { Request, Response } from "express";
 import multer from "multer";
 import path from "path";
 import { AppDataSource } from "./data-source";
-
+import { csvQueue } from "./queue";
 // Cấu hình multer: nơi lưu file + tên file
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -34,7 +34,7 @@ app.get("/", (req: Request, res: Response) => {
   `);
 });
 
-// Route upload file CSV (chỉ nhận 1 file, field name là "csvFile")
+// Route upload file CSV
 app.post("/upload", upload.single("csvFile"), async (req: Request, res: Response) => {
   try {
     if (!req.file) {
@@ -44,17 +44,21 @@ app.post("/upload", upload.single("csvFile"), async (req: Request, res: Response
     const filePath = req.file.path;
     console.log("File đã upload:", filePath);
 
-    // Sau này: đẩy filePath vào BullMQ queue ở đây
-    // Hiện tại chỉ trả về thông báo thành công
+    // Đẩy job vào queue thay vì xử lý ngay
+    const job = await csvQueue.add("process-csv", {
+      filePath,
+      originalName: req.file.originalname,
+    });
+
     res.json({
-      message: "File CSV đã được nhận và lưu tạm",
+      message: "File CSV đã được nhận và đẩy vào queue để xử lý",
+      jobId: job.id,
       fileName: req.file.originalname,
       savedPath: filePath,
-      size: req.file.size,
     });
   } catch (err) {
-    console.error("Lỗi khi upload:", err);
-    res.status(500).json({ error: "Lỗi server khi xử lý file" });
+    console.error("Lỗi khi upload hoặc add job:", err);
+    res.status(500).json({ error: "Lỗi server" });
   }
 });
 
