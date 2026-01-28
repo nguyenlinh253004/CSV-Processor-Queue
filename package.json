@@ -16,18 +16,21 @@
   "dependencies": {
     "bullmq": "^5.67.1",
     "csv-parser": "^3.2.0",
+    "csv-writer": "^1.6.0",
     "express": "^5.2.1",
     "ioredis": "^5.9.2",
     "multer": "^2.0.2",
     "node-cache": "^5.1.2",
     "reflect-metadata": "^0.2.2",
     "sqlite3": "^5.1.7",
-    "typeorm": "^0.3.28"
+    "typeorm": "^0.3.28",
+    "uuid": "^8.3.2"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/multer": "^2.0.0",
     "@types/node": "^25.0.10",
+    "@types/uuid": "^10.0.0",
     "nodemon": "^3.1.11",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
