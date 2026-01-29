@@ -35,7 +35,26 @@ app.get("/", (req: Request, res: Response) => {
     <p>Thử upload file CSV tại: <a href="/upload">/upload</a> (sẽ có form sau)</p>
   `);
 });
-
+app.get("/upload-form", (req: Request, res: Response) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="vi">
+    <head>
+      <meta charset="UTF-8">
+      <title>Upload CSV</title>
+    </head>
+    <body>
+      <h1>Upload file CSV để xử lý</h1>
+      <form action="/upload" method="post" enctype="multipart/form-data">
+        <input type="file" name="csvFile" accept=".csv" required>
+        <button type="submit">Upload & Xử lý</button>
+      </form>
+      <br>
+      <a href="/users?page=1&limit=20">Xem danh sách users (phân trang)</a>
+    </body>
+    </html>
+  `);
+});
 // Route upload file CSV
 app.post("/upload", upload.single("csvFile"), async (req: Request, res: Response) => {
   try {
@@ -63,34 +82,37 @@ app.post("/upload", upload.single("csvFile"), async (req: Request, res: Response
     res.status(500).json({ error: "Lỗi server" });
   }
 });
-// API GET danh sách users (có cache)
+// API GET users với cache + phân trang đơn giản
 app.get("/users", async (req: Request, res: Response) => {
-  const cacheKey = "all_users"; // Có thể thêm query param để key khác (phân trang sau)
+  const page = parseInt(req.query.page as string) || 1;
+  const limit = parseInt(req.query.limit as string) || 50;
+  const skip = (page - 1) * limit;
 
-  // Kiểm tra cache trước
+  // Cache key riêng cho từng trang (để chính xác)
+  const cacheKey = `users_page_${page}_limit_${limit}`;
+
+  // Check cache
   const cached = userCache.get<User[]>(cacheKey);
   if (cached) {
-    console.log("Cache hit: Trả về từ cache");
+    console.log(`Cache hit: ${cacheKey}`);
     return res.json({
       status: "success (from cache)",
-      total: cached.length,
+      page,
+      limit,
+      totalCached: cached.length,
       data: cached,
     });
   }
 
-  console.log("Cache miss: Query từ DB");
+  console.log(`Cache miss: ${cacheKey} - Query DB`);
 
   try {
-    if (!AppDataSource.isInitialized) {
-      await AppDataSource.initialize();
-    }
-
     const userRepository = AppDataSource.getRepository(User);
 
-    // Lấy tất cả users (có thể thêm phân trang: .skip().take() sau)
-    const users = await userRepository.find({
+    const [users, total] = await userRepository.findAndCount({
       order: { createdAt: "DESC" },
-      take: 100, // Giới hạn 100 để tránh trả quá nhiều (tùy chỉnh sau)
+      skip,
+      take: limit,
     });
 
     // Lưu vào cache
@@ -98,7 +120,10 @@ app.get("/users", async (req: Request, res: Response) => {
 
     res.json({
       status: "success",
-      total: users.length,
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
       data: users,
     });
   } catch (err) {

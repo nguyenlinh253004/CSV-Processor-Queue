@@ -56,6 +56,9 @@ const worker = new Worker(
       if (batch.length >= batchSize) {
         await userRepository.save(batch);
         processedCount += batch.length;
+        // Invalidate cache để dữ liệu mới được query lại
+        userCache.del("all_users_list");
+        console.log(`Cache 'all_users_list' invalidated sau job ${job.id}`);
         console.log(`Đã insert ${processedCount} records...`);
         batch = []; // reset batch
       }
@@ -95,7 +98,4 @@ worker.on("completed", (job) => {
 worker.on("failed", (job, err) => {
   console.error(`Job ${job?.id} failed:`, err);
 });
-// Invalidate cache sau khi insert mới (để dữ liệu tươi)
-userCache.del("all_users");
-console.log("Cache invalidated sau khi insert mới");
 console.log("✅ BullMQ Queue & Worker (với CSV processing) đã khởi tạo");
