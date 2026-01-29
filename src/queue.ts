@@ -4,7 +4,7 @@ import fs from "fs";
 import csvParser from "csv-parser";
 import { AppDataSource } from "./data-source";
 import { User } from "./entity/User";
-
+import { userCache } from "./cache";
 // Kết nối Redis
 const connection = new IORedis({
   host: "localhost",
@@ -73,7 +73,7 @@ const worker = new Worker(
     console.log("Memory usage sau xử lý:", process.memoryUsage());
 
     // Xóa file tạm sau khi xử lý xong (tùy chọn, để tiết kiệm disk)
-    fs.unlinkSync(filePath); // Uncomment nếu muốn xóa file gốc
+    fs.unlinkSync(filePath); 
     
     return {
       status: "success",
@@ -95,5 +95,7 @@ worker.on("completed", (job) => {
 worker.on("failed", (job, err) => {
   console.error(`Job ${job?.id} failed:`, err);
 });
-
+// Invalidate cache sau khi insert mới (để dữ liệu tươi)
+userCache.del("all_users");
+console.log("Cache invalidated sau khi insert mới");
 console.log("✅ BullMQ Queue & Worker (với CSV processing) đã khởi tạo");

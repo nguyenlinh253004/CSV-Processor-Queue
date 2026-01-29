@@ -2,6 +2,8 @@ import "reflect-metadata"; // Bắt buộc cho TypeORM decorator
 import express, { Request, Response } from "express";
 import multer from "multer";
 import path from "path";
+import { userCache } from "./cache";
+import { User } from "./entity/User";
 import { AppDataSource } from "./data-source";
 import { csvQueue } from "./queue";
 // Cấu hình multer: nơi lưu file + tên file
@@ -61,7 +63,49 @@ app.post("/upload", upload.single("csvFile"), async (req: Request, res: Response
     res.status(500).json({ error: "Lỗi server" });
   }
 });
+// API GET danh sách users (có cache)
+app.get("/users", async (req: Request, res: Response) => {
+  const cacheKey = "all_users"; // Có thể thêm query param để key khác (phân trang sau)
 
+  // Kiểm tra cache trước
+  const cached = userCache.get<User[]>(cacheKey);
+  if (cached) {
+    console.log("Cache hit: Trả về từ cache");
+    return res.json({
+      status: "success (from cache)",
+      total: cached.length,
+      data: cached,
+    });
+  }
+
+  console.log("Cache miss: Query từ DB");
+
+  try {
+    if (!AppDataSource.isInitialized) {
+      await AppDataSource.initialize();
+    }
+
+    const userRepository = AppDataSource.getRepository(User);
+
+    // Lấy tất cả users (có thể thêm phân trang: .skip().take() sau)
+    const users = await userRepository.find({
+      order: { createdAt: "DESC" },
+      take: 100, // Giới hạn 100 để tránh trả quá nhiều (tùy chỉnh sau)
+    });
+
+    // Lưu vào cache
+    userCache.set(cacheKey, users);
+
+    res.json({
+      status: "success",
+      total: users.length,
+      data: users,
+    });
+  } catch (err) {
+    console.error("Lỗi query users:", err);
+    res.status(500).json({ error: "Lỗi server" });
+  }
+});
 // Khởi động server
 async function startServer() {
   try {
