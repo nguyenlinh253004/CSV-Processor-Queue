@@ -6,6 +6,10 @@ import { userCache } from "./cache";
 import { User } from "./entity/User";
 import { AppDataSource } from "./data-source";
 import { csvQueue } from "./queue";
+import logger from "./logger";
+import { Server } from "socket.io";
+import http from "http";
+import { jobEvents } from "./socketEvents";
 // Cấu hình multer: nơi lưu file + tên file
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -23,6 +27,12 @@ const upload = multer({ storage });
 // Khởi tạo Express app
 const app = express();
 const PORT = 3000;
+const server = http.createServer(app);
+const io = new Server(server);
+
+io.on("connection", (socket) => {
+  console.log("Client connected:", socket.id);
+});
 
 // Middleware để parse JSON (nếu cần sau này)
 app.use(express.json());
@@ -32,7 +42,7 @@ app.get("/", (req: Request, res: Response) => {
   res.send(`
     <h1>CSV Processor Queue đang chạy!</h1>
     <p>Server OK tại <a href="http://localhost:${PORT}">localhost:${PORT}</a></p>
-    <p>Thử upload file CSV tại: <a href="/upload">/upload</a> (sẽ có form sau)</p>
+    <p>Thử upload file CSV tại: <a href="/upload">/upload-form</a> (sẽ có form sau)</p>
   `);
 });
 app.get("/upload-form", (req: Request, res: Response) => {
@@ -51,6 +61,18 @@ app.get("/upload-form", (req: Request, res: Response) => {
       </form>
       <br>
       <a href="/users?page=1&limit=20">Xem danh sách users (phân trang)</a>
+      <div id="status"></div>
+      <script src="/socket.io/socket.io.js"></script>
+      <script>
+        const socket = io();
+        const statusDiv = document.getElementById('status');
+        socket.on("job-progress", (data) => {
+          statusDiv.innerHTML = "Job " + data.jobId + ": Đang xử lý " + data.progress + "%";
+        });
+        socket.on("job-completed", (data) => {
+          statusDiv.innerHTML = "Job " + data.jobId + " hoàn thành! Tổng: " + data.result.total + " dòng.";
+        });
+      </script>
     </body>
     </html>
   `);
@@ -69,7 +91,14 @@ app.post("/upload", upload.single("csvFile"), async (req: Request, res: Response
     const job = await csvQueue.add("process-csv", {
       filePath,
       originalName: req.file.originalname,
-    });
+    },
+  {
+     attempts: 3,
+    backoff: {
+      type: "exponential",
+      delay: 5000, // Thử lại sau 5s, 10s, 20s...
+    },
+  });
 
     res.json({
       message: "File CSV đã được nhận và đẩy vào queue để xử lý",
@@ -135,13 +164,28 @@ app.get("/users", async (req: Request, res: Response) => {
 async function startServer() {
   try {
     await AppDataSource.initialize();
-    console.log("✅ Database đã kết nối thành công");
+    logger.info("📡 Database connected!");
 
-    app.listen(PORT, () => {
-      console.log(`🚀 Server đang chạy tại http://localhost:${PORT}`);
+
+    // 3. Chạy Server
+    server.listen(PORT, () => {
+      logger.info(`🚀 Server running at http://localhost:${PORT}`);
     });
+
+    // MONITOR MEMORY LEAK (Check mỗi phút)
+    setInterval(() => {
+      const memory = process.memoryUsage();
+      const heapUsedMB = Math.round(memory.heapUsed / 1024 / 1024);
+      
+      if (heapUsedMB > 300) { // Cảnh báo nếu dùng > 300MB
+        logger.warn(" Cảnh báo Memory Leak tiềm ẩn:", {
+          heapUsed: `${heapUsedMB} MB`,
+          rss: `${Math.round(memory.rss / 1024 / 1024)} MB`
+        });
+      }
+    }, 60000);
   } catch (err) {
-    console.error("❌ Không thể khởi động server:", err);
+    logger.error(" Không thể khởi động server:", err);
     process.exit(1);
   }
 }

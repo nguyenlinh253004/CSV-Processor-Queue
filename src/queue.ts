@@ -1,11 +1,13 @@
 import { Queue, Worker } from "bullmq";
+import { Worker as WorkerThread } from "worker_threads";
 import IORedis from "ioredis";
 import fs from "fs";
-import csvParser from "csv-parser";
+import path from "path";
 import { AppDataSource } from "./data-source";
 import { User } from "./entity/User";
 import { userCache } from "./cache";
-// Kết nối Redis
+import logger from "./logger"; // Import Winston logger
+import { jobEvents } from "./socketEvents";
 const connection = new IORedis({
   host: "localhost",
   port: 6379,
@@ -14,88 +16,91 @@ const connection = new IORedis({
 
 export const csvQueue = new Queue("csv-processing", { connection });
 
-// Worker xử lý job thật
 const worker = new Worker(
   "csv-processing",
   async (job) => {
     const { filePath, originalName } = job.data;
-    console.log(`Bắt đầu xử lý job ${job.id} - File: ${originalName} (${filePath})`);
+    logger.info(`🚀 Bắt đầu Job ${job.id} - File: ${originalName}`);
 
-    // Kiểm tra memory trước khi xử lý
-    console.log("Memory usage trước xử lý:", process.memoryUsage());
+    // Ước tính số dòng để làm Progress
+    const fileStats = fs.statSync(filePath);
+    const estimatedTotal = Math.max(1, Math.round(fileStats.size / 60)); // Giả định ~60 bytes/dòng
 
-    let processedCount = 0;
-    const batchSize = 500; // Insert theo batch 500 records/lần để tối ưu
-    let batch: Partial<User>[] = [];
-
-    // Sử dụng stream để đọc CSV (rất quan trọng cho file lớn)
-    const stream = fs
-      .createReadStream(filePath)
-      .pipe(csvParser());
-
-    // Khởi tạo DataSource nếu chưa (vì worker chạy riêng)
-    if (!AppDataSource.isInitialized) {
-      await AppDataSource.initialize();
-    }
-
+    if (!AppDataSource.isInitialized) await AppDataSource.initialize();
     const userRepository = AppDataSource.getRepository(User);
 
-    // Xử lý từng row từ stream
-    for await (const row of stream) {
-      const user = new User();
-      user.name = row.name?.trim() || "Unknown";
-      user.email = row.email?.trim() || null;
-      user.age = parseInt(row.age) || 0;
+    try {
+      // BƯỚC 1: PARSE (Worker Thread)
+      const parsedUsers = await new Promise<Partial<User>[]>((resolve, reject) => {
+        const workerThread = new WorkerThread(path.resolve(__dirname, "./workers/csv-parser-worker.js"), {
+          workerData: { chunkFilePath: filePath },
+        });
+        workerThread.on("message", (res) => res.status === "success" ? resolve(res.users) : reject(new Error(res.error)));
+        workerThread.on("error", reject);
+      });
 
-      // Validate cơ bản (có thể thêm validation tốt hơn sau)
-      if (!user.email || user.email === "") continue;
+      // BƯỚC 2: INSERT BATCH & PROGRESS
+      let processedCount = 0;
+      const batchSize = 500;
+      let batch: Partial<User>[] = [];
 
-      batch.push(user);
-
-      // Khi đủ batch → save bulk
-      if (batch.length >= batchSize) {
-        await userRepository.save(batch);
-        processedCount += batch.length;
-        // Invalidate cache để dữ liệu mới được query lại
-        userCache.del("all_users_list");
-        console.log(`Cache 'all_users_list' invalidated sau job ${job.id}`);
-        console.log(`Đã insert ${processedCount} records...`);
-        batch = []; // reset batch
+      for (const user of parsedUsers) {
+        batch.push(user);
+        if (batch.length >= batchSize) {
+          await userRepository
+          .createQueryBuilder()
+          .insert()
+          .into(User)
+          .values(batch)
+          .orIgnore(true)  // Ignore nếu vi phạm unique (email trùng)
+          .execute();
+          processedCount += batch.length;
+          
+          // Cập nhật Progress cho BullMQ
+          const progress = Math.min(100, Math.round((processedCount / estimatedTotal) * 100));
+          await job.updateProgress(progress);
+          // Trong worker, khi update progress:
+          jobEvents.emit("job-progress", { jobId: job.id, progress: progress });
+          logger.info(`Job ${job.id} Progress: ${progress}%`);
+          batch = [];
+        }
       }
+
+      if (batch.length > 0) {
+        await userRepository
+          .createQueryBuilder()
+          .insert()
+          .into(User)
+          .values(batch)
+          .orIgnore(true)  // Ignore nếu vi phạm unique (email trùng)
+          .execute();
+        processedCount += batch.length;
+        await job.updateProgress(100);
+      }
+
+      userCache.flushAll();
+      logger.info("Cache flushed sau khi insert mới");
+      // Xóa file async, chỉ khi thành công
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      logger.info(`🏁 Job ${job.id} hoàn thành thành công!`);
+      return { status: "success", total: processedCount };
+
+    } catch (error) {
+      logger.error(` Lỗi tại Job ${job.id}:`, error);
+      throw error; // Quăng lỗi để BullMQ kích hoạt Retry
     }
-
-    // Insert batch cuối nếu còn
-    if (batch.length > 0) {
-      await userRepository.save(batch);
-      processedCount += batch.length;
-    }
-
-    console.log(`Hoàn thành job ${job.id} - Tổng records: ${processedCount}`);
-
-    // Log memory sau xử lý
-    console.log("Memory usage sau xử lý:", process.memoryUsage());
-
-    // Xóa file tạm sau khi xử lý xong (tùy chọn, để tiết kiệm disk)
-    fs.unlinkSync(filePath); 
-    
-    return {
-      status: "success",
-      processedRecords: processedCount,
-      fileName: originalName,
-    };
   },
   {
     connection,
-    concurrency: 1, // Hiện tại 1 worker, sau có thể tăng nếu dùng nhiều core
+    concurrency: 1,
+    // CẤU HÌNH RETRY TẠI ĐÂY
   }
 );
-
-// Event listener
 worker.on("completed", (job) => {
-  console.log(`Job ${job.id} completed:`, job.returnvalue);
+  logger.info(`Job ${job.id} completed:`, job.returnvalue);
 });
 
 worker.on("failed", (job, err) => {
-  console.error(`Job ${job?.id} failed:`, err);
+  logger.error(`Job ${job?.id} failed sau ${job?.attemptsMade || 0} attempts:`, err);
 });
-console.log("✅ BullMQ Queue & Worker (với CSV processing) đã khởi tạo");
+console.log(" BullMQ Queue & Worker (với CSV processing) đã khởi tạo");
