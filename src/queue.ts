@@ -1,20 +1,41 @@
 import { Queue, Worker } from "bullmq";
 import { Worker as WorkerThread } from "worker_threads";
-import IORedis from "ioredis";
 import fs from "fs";
 import path from "path";
 import { AppDataSource } from "./data-source";
 import { User } from "./entity/User";
-import { userCache } from "./cache";
+
 import logger from "./logger"; // Import Winston logger
 import { jobEvents } from "./socketEvents";
-const connection = new IORedis({
-  host: "localhost",
-  port: 6379,
-  maxRetriesPerRequest: null,
+import { redisClient } from "./config/redis";
+import { userService } from "./services/user.service";
+
+// Queue chính
+export const csvQueue = new Queue("csv-processing", {
+  connection: redisClient,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: {
+      type: "exponential",
+      delay: 5000,
+    },
+    // Job hoàn thành giữ lại 100 cái để xem trên dashboard
+    removeOnComplete: { count: 100 },
+    // Job thất bại giữ lại 50 cái — đây chính là Dead Letter Queue
+    removeOnFail: { count: 50 },
+  },
 });
 
-export const csvQueue = new Queue("csv-processing", { connection });
+// Dead Letter Queue — chứa job thất bại hoàn toàn
+export const deadLetterQueue = new Queue("csv-dead-letter", {
+  connection: redisClient,
+  defaultJobOptions: {
+    removeOnComplete: { count: 50 },
+    removeOnFail: false, // Giữ lại mãi để debug
+  },
+});
+
+
 
 const worker = new Worker(
   "csv-processing",
@@ -78,8 +99,8 @@ const worker = new Worker(
         await job.updateProgress(100);
       }
 
-      userCache.flushAll();
-      logger.info("Cache flushed sau khi insert mới");
+    await userService.invalidateUserCache();
+    logger.info("Redis cache đã được invalidate sau khi insert mới");
       // Xóa file async, chỉ khi thành công
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
       logger.info(`🏁 Job ${job.id} hoàn thành thành công!`);
@@ -91,7 +112,7 @@ const worker = new Worker(
     }
   },
   {
-    connection,
+    connection: redisClient,
     concurrency: 1,
     // CẤU HÌNH RETRY TẠI ĐÂY
   }
@@ -100,7 +121,25 @@ worker.on("completed", (job) => {
   logger.info(`Job ${job.id} completed:`, job.returnvalue);
 });
 
-worker.on("failed", (job, err) => {
-  logger.error(`Job ${job?.id} failed sau ${job?.attemptsMade || 0} attempts:`, err);
+worker.on("failed", async (job, err) => {
+   if (!job) return;
+
+  logger.error(`Job ${job.id} failed sau ${job.attemptsMade} attempts:`, err);
+
+  // Chỉ chuyển sang DLQ khi đã hết retry
+  if (job.attemptsMade >= (job.opts.attempts ?? 3)) {
+    await deadLetterQueue.add(
+      "failed-csv",
+      {
+        ...job.data,
+        failedReason: err.message,
+        failedAt: new Date().toISOString(),
+        originalJobId: job.id,
+        attemptsMade: job.attemptsMade,
+      },
+      { jobId: `dlq-${job.id}` } // jobId cố định để không bị duplicate
+    );
+    logger.warn(`Job ${job.id} đã được chuyển vào Dead Letter Queue`);
+  }
 });
 console.log(" BullMQ Queue & Worker (với CSV processing) đã khởi tạo");

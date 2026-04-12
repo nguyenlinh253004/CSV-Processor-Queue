@@ -14,6 +14,12 @@ export class User {
   @Column({ type: "int", default: 0 })
   age!: number;              // thêm !
 
+  @Column({ nullable: true, select: false }) // select:false → không trả password ra ngoài
+  password!: string;
+
+  @Column({ default: "user" })
+  role!: string; // "user" | "admin"
+  
   @CreateDateColumn()
   createdAt!: Date;          // thêm !
 
