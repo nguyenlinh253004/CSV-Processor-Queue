@@ -1,0 +1,63 @@
+# docker-compose.yml
+version: "3.9"
+
+services:
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: csv_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Backend
+  backend:
+    build:
+      context: ./CSV-Processor-Queue
+      dockerfile: Dockerfile
+    container_name: csv_backend
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      NODE_ENV: production
+      JWT_SECRET: ${JWT_SECRET}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    volumes:
+      - ./CSV-Processor-Queue/database.sqlite:/app/database.sqlite
+      - backend_uploads:/app/uploads
+      - backend_logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Frontend
+  frontend:
+    build:
+      context: ./csv-processor-frontend
+      dockerfile: Dockerfile
+    container_name: csv_frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  backend_uploads:
+  backend_logs:
